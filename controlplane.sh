@@ -12,10 +12,6 @@ is_running() {
 
 # Function to check if all components are running
 check_running() {
-    is_running "etcd" && \
-    is_running "kube-apiserver" && \
-    is_running "kube-controller-manager" && \
-    is_running "kube-scheduler" && \
     is_running "kubelet" && \
     is_running "containerd"
 }
@@ -107,45 +103,9 @@ EOF
         return 0
     fi
 
-    # Start components if not running
-    if ! is_running "etcd"; then
-        echo "Starting etcd..."
-        sudo kubebuilder/bin/etcd \
-            --advertise-client-urls http://$HOST_IP:2379 \
-            --listen-client-urls http://0.0.0.0:2379 \
-            --data-dir ./etcd \
-            --listen-peer-urls http://0.0.0.0:2380 \
-            --initial-cluster default=http://$HOST_IP:2380 \
-            --initial-advertise-peer-urls http://$HOST_IP:2380 \
-            --initial-cluster-state new \
-            --initial-cluster-token test-token &
-    fi
-
-    if ! is_running "kube-apiserver"; then
-        echo "Starting kube-apiserver..."
-        echo "use application/vnd.kubernetes.protobuf for better performance"
-        sudo kubebuilder/bin/kube-apiserver \
-            --etcd-servers=http://$HOST_IP:2379 \
-            --service-cluster-ip-range=$SVC_CIDR\
-            --bind-address=0.0.0.0 \
-            --secure-port=6443 \
-            --advertise-address=$HOST_IP \
-            --token-auth-file=/tmp/token.csv \
-            --enable-priority-and-fairness=false \
-            --allow-privileged=true \
-            --profiling=true \
-            --storage-backend=etcd3 \
-            --storage-media-type=application/vnd.kubernetes.protobuf\
-            --v=0 \
-            --service-account-issuer=https://kubernetes.default.svc.cluster.local \
-            --service-account-key-file=/tmp/sa.pub \
-            --service-account-signing-key-file=/tmp/sa.key \
-            --tls-cert-file=/etc/kubernetes/pki/apiserver.crt \
-            --tls-private-key-file=/etc/kubernetes/pki/apiserver.key \
-            --authorization-mode=Node,RBAC \
-            --anonymous-auth=false \
-            --runtime-config=api/all=true &
-    fi
+    # Generate PKI and kubeconfigs
+    echo "Generating PKI and kubeconfigs..."
+    bash /Users/andrusik/GitHub/mastering-k8s/pki.sh
 
 # Configure CNI
 sudo tee /etc/cni/net.d/10-mynet.conf <<EOF
@@ -188,31 +148,13 @@ sudo kubebuilder/bin/kubectl -n kube-system create configmap extension-apiserver
     NODE_NAME=$(hostname)
     sudo kubebuilder/bin/kubectl label node "$NODE_NAME" node-role.kubernetes.io/master="" --overwrite || true
 
-    if ! is_running "kube-controller-manager"; then
-        echo "Starting kube-controller-manager..."
-        sudo PATH=$PATH:/opt/cni/bin:/usr/sbin kubebuilder/bin/kube-controller-manager \
-            --kubeconfig=/var/lib/kubelet/kubeconfig \
-            --service-cluster-ip-range=$SVC_CIDR \
-            --cluster-cidr=$POD_CIDR \
-            --leader-elect=false \
-            --cloud-provider=external \
-            --cluster-name=kubernetes \
-            --root-ca-file=/var/lib/kubelet/ca.crt \
-            --cluster-signing-cert-file=/etc/kubernetes/pki/ca.crt \
-            --cluster-signing-key-file=/etc/kubernetes/pki/ca.key \
-            --use-service-account-credentials=true \
-            --controllers="*,csrsigning" \
-            --v=0 &
-    fi
-
-    if ! is_running "kube-scheduler"; then
-        echo "Starting kube-scheduler..."
-        sudo kubebuilder/bin/kube-scheduler \
-            --kubeconfig=/root/.kube/config \
-            --leader-elect=false \
-            --v=0 \
-            --bind-address=0.0.0.0 &
-    fi
+    # Place static Pod manifests for control plane
+    echo "Placing static Pod manifests..."
+    sudo mkdir -p /etc/kubernetes/manifests
+    sudo cp /Users/andrusik/GitHub/mastering-k8s/manifests/etcd.yaml /etc/kubernetes/manifests/
+    sudo cp /Users/andrusik/GitHub/mastering-k8s/manifests/kube-apiserver.yaml /etc/kubernetes/manifests/
+    sudo cp /Users/andrusik/GitHub/mastering-k8s/manifests/kube-controller-manager.yaml /etc/kubernetes/manifests/
+    sudo cp /Users/andrusik/GitHub/mastering-k8s/manifests/kube-scheduler.yaml /etc/kubernetes/manifests/
 
  # echo "Applying kubernetes service configuration..."
     sudo iptables-save | tee /tmp/iptables_backup.conf | grep -v '\-A' | sudo iptables-restore
@@ -222,7 +164,7 @@ sudo kubebuilder/bin/kubectl -n kube-system create configmap extension-apiserver
     # # Ensure pod traffic is allowed through FORWARD
     sudo iptables -A FORWARD -s ${POD_CIDR} -j ACCEPT
     sudo iptables -A FORWARD -d ${POD_CIDR} -j ACCEPT
-    
+
 ## Start kube-proxy
 tee /tmp/kube-proxy.conf.yml <<EOF
 kind: KubeProxyConfiguration
@@ -236,7 +178,7 @@ EOF
     echo "Starting kube-proxy..."
     sudo kubebuilder/bin/kube-proxy --config=/tmp/kube-proxy.conf.yml --proxy-mode=iptables&
     fi
-    
+
     # Create required directories with proper permissions
     sudo mkdir -p /var/lib/kubelet/pods
     sudo chmod 750 /var/lib/kubelet/pods
@@ -244,8 +186,6 @@ EOF
     sudo chmod 750 /var/lib/kubelet/plugins
     sudo mkdir -p /var/lib/kubelet/plugins_registry
     sudo chmod 750 /var/lib/kubelet/plugins_registry
-    
-    echo "Waiting for components to be ready..."
 
     echo "Starting kubelet..."
     sudo PATH=$PATH:/opt/cni/bin:/usr/sbin kubebuilder/bin/kubelet \
@@ -257,19 +197,33 @@ EOF
         --node-ip=$HOST_IP \
         --v=0 &
 
-    # Wait for all components to be running
+    echo "Waiting for kubelet and apiserver to become ready..."
+    # Wait for kubelet
     for i in {1..30}; do
         if check_running; then
-            echo "All Kubernetes components are running"
             break
         fi
-        echo "Waiting for components to start..."
+        echo "Waiting for kubelet..."
         sleep 2
     done
-    echo "Verifying setup..."
-    sudo kubebuilder/bin/kubectl get --raw='/readyz?verbose'
-    pgrep kubelet
-    pgrep kube-proxy
+    # Wait for apiserver readiness
+    for i in {1..60}; do
+        if sudo kubebuilder/bin/kubectl get --raw='/readyz?verbose' >/dev/null 2>&1; then
+            echo "kube-apiserver is ready"
+            break
+        fi
+        echo "Waiting for kube-apiserver readiness..."
+        sleep 2
+    done
+
+    echo "Applying extension-apiserver-authentication ConfigMap..."
+    sudo kubebuilder/bin/kubectl -n kube-system create configmap extension-apiserver-authentication \
+      --from-file=client-ca-file=/etc/kubernetes/pki/ca.crt \
+      --from-file=requestheader-client-ca-file=/etc/kubernetes/pki/ca.crt \
+      --dry-run=client -o yaml | sudo kubebuilder/bin/kubectl apply -f -
+
+    echo "Deploying nginx workload..."
+    sudo kubebuilder/bin/kubectl apply -f /Users/andrusik/GitHub/mastering-k8s/workloads/nginx-deployment.yaml
 }
 
 stop() {
@@ -309,4 +263,4 @@ case "${1:-}" in    start)
         echo "Usage: $0 {start|stop|cleanup}"
         exit 1
         ;;
-esac 
+esac

@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-apiserver
+  namespace: kube-system
+  labels:
+    tier: control-plane
+    component: kube-apiserver
+spec:
+  hostNetwork: true
+  priorityClassName: system-node-critical
+  containers:
+  - name: kube-apiserver
+    image: registry.k8s.io/kube-apiserver:v1.30.3
+    command:
+    - kube-apiserver
+    - --etcd-servers=http://127.0.0.1:2379
+    - --service-cluster-ip-range=10.10.0.0/24
+    - --bind-address=0.0.0.0
+    - --secure-port=6443
+    - --advertise-address=127.0.0.1
+    - --token-auth-file=/tmp/token.csv
+    - --enable-priority-and-fairness=false
+    - --allow-privileged=true
+    - --profiling=true
+    - --storage-backend=etcd3
+    - --storage-media-type=application/vnd.kubernetes.protobuf
+    - --service-account-issuer=https://kubernetes.default.svc.cluster.local
+    - --service-account-key-file=/tmp/sa.pub
+    - --service-account-signing-key-file=/tmp/sa.key
+    - --tls-cert-file=/etc/kubernetes/pki/apiserver.crt
+    - --tls-private-key-file=/etc/kubernetes/pki/apiserver.key
+    - --authorization-mode=Node,RBAC
+    - --anonymous-auth=false
+    - --runtime-config=api/all=true
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /livez
+        port: 6443
+        scheme: HTTPS
+      initialDelaySeconds: 15
+      timeoutSeconds: 15
+    readinessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /readyz
+        port: 6443
+        scheme: HTTPS
+      initialDelaySeconds: 15
+      timeoutSeconds: 15
+    volumeMounts:
+    - name: pki
+      mountPath: /etc/kubernetes/pki
+      readOnly: true
+    - name: tmp
+      mountPath: /tmp
+  volumes:
+  - name: pki
+    hostPath:
+      path: /etc/kubernetes/pki
+      type: DirectoryOrCreate
+  - name: tmp
+    hostPath:
+      path: /tmp
+      type: Directory
+

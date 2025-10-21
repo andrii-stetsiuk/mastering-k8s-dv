@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-scheduler
+  namespace: kube-system
+  labels:
+    tier: control-plane
+    component: kube-scheduler
+spec:
+  hostNetwork: true
+  priorityClassName: system-node-critical
+  containers:
+  - name: kube-scheduler
+    image: registry.k8s.io/kube-scheduler:v1.30.3
+    command:
+    - kube-scheduler
+    - --kubeconfig=/root/.kube/config
+    - --leader-elect=false
+    - --v=0
+    - --bind-address=0.0.0.0
+    volumeMounts:
+    - name: root-kube
+      mountPath: /root/.kube
+      readOnly: true
+  volumes:
+  - name: root-kube
+    hostPath:
+      path: /root/.kube
+      type: DirectoryOrCreate
+
